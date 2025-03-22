@@ -1,5 +1,6 @@
 package org.example.apiserver;
 
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -15,6 +16,8 @@ import java.sql.*;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 
 /**
  * Database: test
@@ -30,7 +33,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * 	    }
  * 	    (ideally ts should also be sent from client, but not done in this prototype)
  *
- * 	 2) GET /api/status
+ * 	 2) GET /api/status?id=9,99,999
  *
  */
 public class Server implements HttpHandler {
@@ -97,14 +100,21 @@ public class Server implements HttpHandler {
         URI uri = exchange.getRequestURI();
 
         if (GET_STATUS_URI.equals(uri.getPath())) {
-            String response = "Hello GET";
+            String query = uri.getQuery();
+            String[] args = query.split("=");
 
-            exchange.sendResponseHeaders(200, response.getBytes().length);
+            if ("id".equals(args[0])) {
+                String users = getOnlineUsersFromDb(args[1]);
 
-            OutputStream os = exchange.getResponseBody();
-            os.write(response.getBytes());
-            os.flush();
-            os.close();
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, users.getBytes().length);
+                OutputStream os = exchange.getResponseBody();
+                os.write(users.getBytes());
+                os.flush();
+                os.close();
+            }
+            else
+                exchange.sendResponseHeaders(405, -1); // Method Not Allowed
         }
     }
 
@@ -167,5 +177,40 @@ public class Server implements HttpHandler {
             if (conn != null)
                 databasePool.returnConnection(conn);
         }
+    }
+
+    private String getOnlineUsersFromDb(String usersList) {
+        Connection conn = null;
+        String[] ids = usersList.split(",");
+
+        try {
+            conn = databasePool.getConnection();
+            String query = "SELECT * FROM user_heartbeats WHERE id IN (" + usersList + ")";
+
+            Statement statement = conn.createStatement();
+            ResultSet resultSet =  statement.executeQuery(query);
+
+            ObjectMapper objMapper = new ObjectMapper();
+            ArrayNode arrayNode = objMapper.createArrayNode();
+
+            while (resultSet.next()) {
+                ObjectNode entry = objMapper.createObjectNode();
+
+                entry.put("id", resultSet.getInt("id"));
+                entry.put("lastActive", String.valueOf(resultSet.getTimestamp("last_hb")));
+
+                arrayNode.add(entry);
+            }
+
+            return arrayNode.toString();
+        }
+        catch (Exception e) {
+            e.printStackTrace();
+        }
+        finally {
+            if (conn != null)
+                databasePool.returnConnection(conn);
+        }
+        return "";
     }
 }
