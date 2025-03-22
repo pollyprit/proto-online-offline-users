@@ -54,7 +54,7 @@ public class Server implements HttpHandler {
                 break;
 
             default:
-                exchange.sendResponseHeaders(405, 0);
+                handleError(exchange);
                 break;
         }
     }
@@ -83,5 +83,12 @@ public class Server implements HttpHandler {
             OutputStream os = exchange.getResponseBody();
             os.write(response.getBytes());
         }
+    }
+
+    private void handleError(HttpExchange exchange) throws IOException {
+        String response = "ERROR";
+        exchange.sendResponseHeaders(405, response.length());
+        OutputStream os = exchange.getResponseBody();
+        os.write(response.getBytes());
     }
 }
