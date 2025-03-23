@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import org.example.database.CleaningJob;
 import org.example.database.DBConnectionPool;
 
 import java.io.IOException;
@@ -17,7 +18,6 @@ import java.sql.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 
 /**
  * Database: test
@@ -33,7 +33,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
  * 	    }
  * 	    (ideally ts should also be sent from client, but not done in this prototype)
  *
- * 	 2) GET /api/status?id=9,99,999
+ * 	 2) GET /api/online?id=9,99,999
  *
  */
 public class Server implements HttpHandler {
@@ -41,13 +41,16 @@ public class Server implements HttpHandler {
     private int BACKLOG = 0;
     private HttpServer server;
 
-    private String GET_STATUS_URI = "/api/status";
+    private String GET_ONLINE_URI = "/api/online";
     private String POST_HEARTBEAT_URI = "/api/heartbeat";
 
     private DBConnectionPool databasePool;
     private final String DB_URL = "jdbc:postgresql://localhost:5432/test";
     private final String DB_USER = "postgres";
     private final String DB_PASSWORD = "postgres";
+    private Thread cleaningJob;
+    private int CLEANING_JOB_INTERVAL_SEC = 5;
+    private int USER_ONLINE_TTL_SEC = 10;
 
     public Server(int port, int backlog) {
         this.PORT = port;
@@ -61,7 +64,7 @@ public class Server implements HttpHandler {
             throw new RuntimeException(e);
         }
 
-        server.createContext(GET_STATUS_URI, this);
+        server.createContext(GET_ONLINE_URI, this);
         server.createContext(POST_HEARTBEAT_URI, this);
 
         server.setExecutor(null);  // use default executor
@@ -73,6 +76,15 @@ public class Server implements HttpHandler {
         } catch (SQLException | ClassNotFoundException e) {
             throw new RuntimeException(e);
         }
+
+        try {
+            cleaningJob = new Thread(new CleaningJob(DB_URL, DB_USER, DB_PASSWORD,
+                    CLEANING_JOB_INTERVAL_SEC, USER_ONLINE_TTL_SEC));
+        } catch (ClassNotFoundException | SQLException e) {
+            throw new RuntimeException(e);
+        }
+
+        cleaningJob.start();
 
         server.start();
     }
@@ -96,10 +108,14 @@ public class Server implements HttpHandler {
         }
     }
 
+    public void stopServer() {
+        // TODO: Stop the cleaning job thread gracefully.
+    }
+
     private void handleGetMethod(HttpExchange exchange) throws IOException {
         URI uri = exchange.getRequestURI();
 
-        if (GET_STATUS_URI.equals(uri.getPath())) {
+        if (GET_ONLINE_URI.equals(uri.getPath())) {
             String query = uri.getQuery();
             String[] args = query.split("=");
 
