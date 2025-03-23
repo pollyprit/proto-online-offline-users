@@ -14,10 +14,12 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.*;
+import java.util.List;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.example.redis.RedisClient;
 
 /**
  * Database: test
@@ -45,16 +47,20 @@ public class Server implements HttpHandler {
     private String POST_HEARTBEAT_URI = "/api/heartbeat";
 
     private DBConnectionPool databasePool;
+    private RedisClient redisClient;
     private final String DB_URL = "jdbc:postgresql://localhost:5432/test";
     private final String DB_USER = "postgres";
     private final String DB_PASSWORD = "postgres";
     private Thread cleaningJob;
     private int CLEANING_JOB_INTERVAL_SEC = 5;
-    private int USER_ONLINE_TTL_SEC = 10;
+    private int USER_ONLINE_TTL_SEC = 60;
 
-    public Server(int port, int backlog) {
+    StorageStrategy storageStrategy;
+
+    public Server(int port, int backlog, StorageStrategy storageStrategy) {
         this.PORT = port;
         this.BACKLOG = backlog;
+        this.storageStrategy = storageStrategy;
     }
 
     public void start() {
@@ -71,20 +77,19 @@ public class Server implements HttpHandler {
 
         System.out.println("Server starting on PORT " + this.PORT);
 
-        try {
-            databasePool = new DBConnectionPool(DB_URL, DB_USER, DB_PASSWORD, 10);
-        } catch (SQLException | ClassNotFoundException e) {
-            throw new RuntimeException(e);
-        }
-
-        try {
-            cleaningJob = new Thread(new CleaningJob(DB_URL, DB_USER, DB_PASSWORD,
-                    CLEANING_JOB_INTERVAL_SEC, USER_ONLINE_TTL_SEC));
-        } catch (ClassNotFoundException | SQLException e) {
-            throw new RuntimeException(e);
-        }
-
-        cleaningJob.start();
+        if (storageStrategy == StorageStrategy.DATABASE) {
+            try {
+                databasePool = new DBConnectionPool(DB_URL, DB_USER, DB_PASSWORD, 10);
+                cleaningJob = new Thread(new CleaningJob(DB_URL, DB_USER, DB_PASSWORD,
+                        CLEANING_JOB_INTERVAL_SEC, USER_ONLINE_TTL_SEC));
+                cleaningJob.start();
+            } catch (SQLException | ClassNotFoundException e) {
+                throw new RuntimeException(e);
+            }
+        } else if (storageStrategy == StorageStrategy.REDIS) {
+            redisClient = new RedisClient();
+        } else
+            throw new RuntimeException("Unknown storage strategy");
 
         server.start();
     }
@@ -120,16 +125,20 @@ public class Server implements HttpHandler {
             String[] args = query.split("=");
 
             if ("id".equals(args[0])) {
-                String users = getOnlineUsersFromDb(args[1]);
+                String onlineUsers = "";
+
+                if (storageStrategy == StorageStrategy.DATABASE)
+                    onlineUsers = getOnlineUsersFromDb(args[1]);
+                else if (storageStrategy == StorageStrategy.REDIS)
+                    onlineUsers = getOnlineUsersFromRedis(args[1]);
 
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
-                exchange.sendResponseHeaders(200, users.getBytes().length);
+                exchange.sendResponseHeaders(200, onlineUsers.getBytes().length);
                 OutputStream os = exchange.getResponseBody();
-                os.write(users.getBytes());
+                os.write(onlineUsers.getBytes());
                 os.flush();
                 os.close();
-            }
-            else
+            } else
                 exchange.sendResponseHeaders(405, -1); // Method Not Allowed
         }
     }
@@ -148,7 +157,12 @@ public class Server implements HttpHandler {
             int userId = jsonNode.get("id").asInt();
             Timestamp heartbeatTime = new Timestamp(System.currentTimeMillis());
 
-            updateUserHeartbeartInDb(userId, heartbeatTime);
+            if (storageStrategy == StorageStrategy.DATABASE)
+                updateUserHeartbeartInDb(userId, heartbeatTime);
+            else if (storageStrategy == StorageStrategy.REDIS)
+                updateUserHeartbeartInRedis(userId, heartbeatTime);
+            else
+                throw new RuntimeException("Unknown storage strategy");
 
             String response = "heartbeat updated for user. id: " + userId + ", ts: " + heartbeatTime;
             exchange.sendResponseHeaders(200, response.getBytes().length);
@@ -185,14 +199,16 @@ public class Server implements HttpHandler {
             preparedStatement.setTimestamp(3, heartbeatTime);
 
             preparedStatement.execute();
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             e.printStackTrace();
-        }
-        finally {
+        } finally {
             if (conn != null)
                 databasePool.returnConnection(conn);
         }
+    }
+
+    private void updateUserHeartbeartInRedis(int userID, Timestamp heartbeatTime) {
+        redisClient.setKey(userID, heartbeatTime.toString(), USER_ONLINE_TTL_SEC);
     }
 
     private String getOnlineUsersFromDb(String usersList) {
@@ -204,7 +220,7 @@ public class Server implements HttpHandler {
             String query = "SELECT * FROM user_heartbeats WHERE id IN (" + usersList + ")";
 
             Statement statement = conn.createStatement();
-            ResultSet resultSet =  statement.executeQuery(query);
+            ResultSet resultSet = statement.executeQuery(query);
 
             ObjectMapper objMapper = new ObjectMapper();
             ArrayNode arrayNode = objMapper.createArrayNode();
@@ -219,14 +235,36 @@ public class Server implements HttpHandler {
             }
 
             return arrayNode.toString();
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             e.printStackTrace();
-        }
-        finally {
+        } finally {
             if (conn != null)
                 databasePool.returnConnection(conn);
         }
         return "";
+    }
+
+    private String getOnlineUsersFromRedis(String usersList) {
+        String[] ids = usersList.split(",");
+
+        StringBuilder keyBuffer = new StringBuilder();
+        for (String id : ids)
+            keyBuffer.append("id:").append(id);
+
+        List<String> result = redisClient.getBatchGet(keyBuffer.toString());
+        ObjectMapper objMapper = new ObjectMapper();
+        ArrayNode arrayNode = objMapper.createArrayNode();
+
+        for (int i = 0; i < ids.length; ++i) {
+            if (result.get(i) != null) {
+                //not null means last heartbeat within the TTL
+                ObjectNode entry = objMapper.createObjectNode();
+
+                entry.put("id", ids[i]);
+                entry.put("lastActive", result.get(i));
+                arrayNode.add(entry);
+            }
+        }
+        return arrayNode.toString();
     }
 }
