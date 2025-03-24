@@ -14,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.*;
+import java.util.ArrayList;
 import java.util.List;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -53,7 +54,7 @@ public class Server implements HttpHandler {
     private final String DB_PASSWORD = "postgres";
     private Thread cleaningJob;
     private int CLEANING_JOB_INTERVAL_SEC = 5;
-    private int USER_ONLINE_TTL_SEC = 60;
+    private int USER_ONLINE_TTL_SEC = 5 * 60;
 
     StorageStrategy storageStrategy;
 
@@ -247,11 +248,11 @@ public class Server implements HttpHandler {
     private String getOnlineUsersFromRedis(String usersList) {
         String[] ids = usersList.split(",");
 
-        StringBuilder keyBuffer = new StringBuilder();
+        List<String> keys = new ArrayList<>();
         for (String id : ids)
-            keyBuffer.append("id:").append(id);
+            keys.add("id:" + id);
 
-        List<String> result = redisClient.getBatchGet(keyBuffer.toString());
+        List<String> result = redisClient.getKeysInBatch(keys.toArray(new String[0]));
         ObjectMapper objMapper = new ObjectMapper();
         ArrayNode arrayNode = objMapper.createArrayNode();
 
